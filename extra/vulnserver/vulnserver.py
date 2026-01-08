@@ -11,8 +11,10 @@ from __future__ import print_function
 
 import base64
 import json
+import random
 import re
 import sqlite3
+import string
 import sys
 import threading
 import traceback
@@ -49,9 +51,20 @@ SCHEMA = """
     );
     INSERT INTO users (id, name, surname) VALUES (1, 'luther', 'blisset');
     INSERT INTO users (id, name, surname) VALUES (2, 'fluffy', 'bunny');
-    INSERT INTO users (id, name, surname) VALUES (3, 'wu', '179ad45c6ce2cb97cf1029e212046e81');
-    INSERT INTO users (id, name, surname) VALUES (4, 'sqlmap/1.0-dev (https://sqlmap.org)', 'user agent header');
-    INSERT INTO users (id, name, surname) VALUES (5, NULL, 'nameisnull');
+    INSERT INTO users (id, name, surname) VALUES (3, 'wu', 'ming');
+    INSERT INTO users (id, name, surname) VALUES (4, NULL, 'nameisnull');
+    INSERT INTO users (id, name, surname) VALUES (5, 'sqlmap/1.0-dev (https://sqlmap.org)', 'user agent header');
+
+    CREATE TABLE creds (
+        user_id INTEGER,
+        password_hash TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    );
+    INSERT INTO creds (user_id, password_hash) VALUES (1, 'db3a16990a0008a3b04707fdef6584a0');
+    INSERT INTO creds (user_id, password_hash) VALUES (2, '4db967ce67b15e7fb84c266a76684729');
+    INSERT INTO creds (user_id, password_hash) VALUES (3, 'f5a2950eaa10f9e99896800eacbe8275');
+    INSERT INTO creds (user_id, password_hash) VALUES (4, NULL);
+    INSERT INTO creds (user_id, password_hash) VALUES (5, '179ad45c6ce2cb97cf1029e212046e81');
 """
 
 LISTEN_ADDRESS = "localhost"
@@ -62,11 +75,15 @@ _cursor = None
 _lock = None
 _server = None
 _alive = False
+_csrf_token = None
 
 def init(quiet=False):
     global _conn
     global _cursor
     global _lock
+    global _csrf_token
+
+    _csrf_token = "".join(random.sample(string.ascii_letters + string.digits, 20))
 
     _conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
     _cursor = _conn.cursor()
@@ -131,6 +148,28 @@ class ReqHandler(BaseHTTPRequestHandler):
 
         self.url, self.params = path, params
 
+        if self.url == "/csrf":
+            if self.params.get("csrf_token") == _csrf_token:
+                self.url = "/"
+            else:
+                self.send_response(OK)
+                self.send_header("Content-type", "text/html; charset=%s" % UNICODE_ENCODING)
+                self.end_headers()
+
+                form = (
+                    "<html><body>"
+                    "CSRF protection check<br>"
+                    "<form action='/csrf' method='POST'>"
+                    "<input type='hidden' name='csrf_token' value='%s'>"
+                    "id: <input type='text' name='id'>"
+                    "<input type='submit' value='Submit'>"
+                    "</form>"
+                    "</body></html>"
+                ) % _csrf_token
+
+                self.wfile.write(form.encode(UNICODE_ENCODING))
+                return
+
         if self.url == '/':
             if not any(_ in self.params for _ in ("id", "query")):
                 self.send_response(OK)
@@ -139,7 +178,7 @@ class ReqHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(b"<!DOCTYPE html><html><head><title>vulnserver</title></head><body><h3>GET:</h3><a href='/?id=1'>link</a><hr><h3>POST:</h3><form method='post'>ID: <input type='text' name='id'><input type='submit' value='Submit'></form></body></html>")
             else:
-                code, output = OK, ""
+                code, output = OK, "<body><html>"
 
                 try:
                     if self.params.get("echo", ""):
@@ -176,6 +215,11 @@ class ReqHandler(BaseHTTPRequestHandler):
                             output += "</table>\n"
                         else:
                             output += "no results found"
+
+                        if not results:
+                            output = "<title>No results</title>" + output
+                        else:
+                            output = "<title>Results</title>" + output
 
                     output += "</body></html>"
                 except Exception as ex:
